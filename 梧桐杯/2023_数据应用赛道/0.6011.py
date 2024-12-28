@@ -1,0 +1,243 @@
+import warnings
+warnings.filterwarnings('ignore')
+import os
+import gc
+import time
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+df_train = pd.read_csv('../output/testa/toUser_train_data.csv')
+df_test = pd.read_csv('../output/testa/testb/test_B.csv')
+
+# 数据预处理
+# 训练集，测试集合并
+df_train['is_test'] = 0
+df_test['is_test'] = 1
+df_all = pd.concat( [df_train,df_test],axis=0,ignore_index=True)#. sample(20000)
+
+# 异常特征检测
+df_all.drop('标签月',axis=1, inplace=True) # 方差为零
+df_all.drop(['上月限速次数','近三月限速次数'],axis=1,inplace=True) #缺失率过高
+
+# 内存压缩，减少内存使用
+def reduce_mem_usage(df):
+    starttime = time.time()
+    numerics = ['int16','int32','int64','float16','float32 ','float64']
+    start_mem = df.memory_usage().sum() / 1024**2
+    for col in df.columns:
+        col_type = df[ col].dtypes
+        if col_type in numerics:
+            c_min = df[col].min()
+            c_max = df[ col].max()
+            if pd.isnull(c_min) or pd.isnull(c_max):
+                continue
+            if str(col_type)[:3] == 'int' :
+                if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8 ).max:
+                    df[col] = df[col].astype(np.int8)
+                elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+                    df[col] = df[col].astype(np.int16)
+                elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+                    df[col] = df[col].astype(np.int32)
+                elif c_min > np.iinfo(np.int64).min and c_max < np.iinfo(np.int64 ).max:
+                    df[col] = df[col].astype(np.int64)
+            else:
+                if c_min > np.finfo(np.float16).min and c_max < np.finfo(np.float16).max:
+                    df[col] = df[col].astype(np.float16)
+                elif c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
+                    df[col] = df[col].astype(np.float32)
+                else:
+                    df[col] = df[col].astype( np.float64)
+    end_mem = df.memory_usage( ).sum() / 1024**2
+    print('Start Memory usage is: {:.2f} MB'.format(start_mem))
+    print('Memory usage after optimization is: {:.2f} MB'.format(end_mem))
+    print('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
+                                                                                                     
+    return df
+
+df_all = reduce_mem_usage(df_all)
+
+# 品牌特征编码
+tranfroms_col = [i for i in df_all.columns if df_all[i].dtypes == 'object' and i != '用户标识']        
+label_dict = {
+    '华为':0,
+    'vivo':1,
+    '荣耀':2,
+    'OPPO':3,
+    '小米':4,
+    '一加':5,
+    '三星':6,
+    '魅族':7,
+    '中兴':8,
+    '中国移动':9,
+    '其他':10,
+    '苹果':11,
+    '金立':12   
+}
+for col in tranfroms_col:
+    df_all[col] = df_all[col].map(label_dict)
+
+# 特征工程
+# 聚合交叉特征
+df_all['当前终端品牌_当前终端使用时长_mean'] = df_all['当前终端品牌'].map(df_all.groupby('当前终端品牌')['当前终端使用时长'].mean())
+df_all['当前终端使用时长离群度'] = df_all['当前终端使用时长']-df_all['当前终端品牌_当前终端使用时长_mean']
+       
+df_all['上次终端品牌_上次终端使用时长_mean'] = df_all['上次终端品牌'].map(df_all.groupby('上次终端品牌')['上次终端使用时长'].mean())
+df_all['上次终端使用时长离群度'] = df_all['上次终端使用时长']-df_all['上次终端品牌_上次终端使用时长_mean']
+
+df_all['上上次终端品牌_上次终端使用时长_mean'] = df_all['上上次终端品牌'].map(df_all.groupby('上上次终端品牌')['上次终端使用时长'].mean())
+df_all['上上次终端使用时长离群度'] = df_all['上上次终端使用时长']-df_all['上上次终端品牌_上次终端使用时长_mean']
+                                                                               
+df_all['终端品牌_nunique'] = df_all[['当前终端品牌','上次终端品牌','上上次终端品牌']].nunique(axis=1)
+df_all['当前终端品牌=家庭交往圈终端品牌偏好'] = df_all['当前终端品牌'] == df_all['家庭交往圈终端品牌偏好']
+df_all['用户历史终端品牌偏好=家庭交往圈终端品牌偏好'] = df_all['用户历史终端品牌偏好'] == df_all['家庭交往圈终端品牌偏好']
+df_all['当前终端品牌=集团交往圈终端品牌偏好'] = df_all['当前终端品牌'] == df_all['集团交往圈终端品牌偏好']
+df_all['用户历史终端品牌偏好=集团交往圈终端品牌偏好'] = df_all['用户历史终端品牌偏好'] == df_all['集团交往圈终端品牌偏好']
+
+df_all['终端品牌_终端价格_mean' ] = df_all['用户历史终端品牌偏好'].map(df_all.groupby('用户历史终端品牌偏好')['终端价格_mean'].mean())
+df_all['终端价格档次_nunique'] = df_all[['当前终端价格档次','上次终端价格档次','上上次终端价格档次','新5G终端档次']].nunique(axis=1)
+
+df_all['当前终端品牌_当前终端价格档次_mean']=df_all['当前终端品牌'].map(df_all.groupby('当前终端品牌')['当前终端价格档次'].mean())
+df_all['当前终端品牌_当前终端价格_mean']=df_all['当前终端品牌'].map(df_all.groupby('当前终端品牌')['当前终端价格'].mean())
+df_all['当前终端价格离群度'] = df_all['当前终端价格']-df_all['当前终端品牌_当前终端价格_mean']
+
+df_all['上次终端品牌_上次终端价格档次_mean']=df_all['上次终端品牌'].map(df_all.groupby('上次终端品牌')['上次终端价格档次'].mean())
+df_all['上次终端品牌_上次终端价格_mean']=df_all['上次终端品牌'].map(df_all.groupby('上次终端品牌')['上次终端价格'].mean())
+df_all['上次终端价格离群度'] = df_all['上次终端价格']-df_all['上次终端品牌_上次终端价格_mean']
+
+df_all['上上次终端品牌_上上次终端价格档次_mean']=df_all['上上次终端品牌'].map(df_all.groupby('上上次终端品牌')['上上次终端价格档次'].mean())
+df_all['上上次终端品牌_上上次终端价格_mean']=df_all['上上次终端品牌'].map(df_all.groupby('上上次终端品牌')['上上次终端价格'].mean())
+df_all['上上次终端价格离群度'] = df_all['上上次终端价格']-df_all['上上次终端品牌_上上次终端价格_mean']
+
+# 组合特征
+df_all['终端价格档次_mean'] = df_all[['当前终端价格档次','上次终端价格档次','上上次终端价格档次','新5G终端档次']].mean(axis=1)
+df_all['终端价格档次_max' ] = df_all[['当前终端价格档次','上次终端价格档次','上上次终端价格档次','新5G终端档次']].max(axis=1)
+df_all['终端价格档次_min'] = df_all[['当前终端价格档次','上次终端价格档次','上上次终端价格档次','新5G终端档次']].min(axis=1)
+df_all['终端价格档次_skew'] = df_all[['上上次终端价格档次','上次终端价格档次','当前终端价格档次','新5G终端档次']].skew(axis=1)
+df_all['终端价格档次_diff'] = df_all['新5G终端档次'] - df_all['上次终端价格档次']
+
+df_all['终端价格_mean'] = df_all[['当前终端价格','上次终端价格','上上次终端价格']].mean(axis=1)
+df_all['终端价格_max' ] = df_all[['当前终端价格','上次终端价格','上上次终端价格']].max(axis=1)
+df_all['终端价格_min'] = df_all[['当前终端价格','上次终端价格','上上次终端价格']].min(axis=1)
+df_all['终端价格_skew'] = df_all[['上上次终端价格','上次终端价格档次','当前终端价格']].skew(axis=1)
+df_all['终端价格_diff'] = df_all['当前终端价格'] - df_all['终端价格_mean']
+
+df_all['终端使用时长_mean'] = df_all[['当前终端使用时长','上次终端使用时长','上上次终端使用时长']].mean(axis=1)
+df_all['终端使用时长_max' ] = df_all[['当前终端使用时长','上次终端使用时长','上上次终端使用时长']].max(axis=1)
+df_all['终端使用时长_min'] = df_all[['当前终端使用时长','上次终端使用时长','上上次终端使用时长']].min(axis=1)
+df_all['终端使用时长_skew'] = df_all[['当前终端使用时长','上次终端使用时长','上上次终端使用时长']].skew(axis=1)
+
+df_all['流量饱和度_mean']=df_all[['上月流量饱和度','上上月流量饱和度','上上上月流量饱和度']].mean(axis=1)
+df_all['流量饱和度_skew']=df_all[['上月流量饱和度','上上月流量饱和度','上上上月流量饱和度']].skew(axis=1)
+
+df_all['DOU_mean']=df_all[['上月DOU', '上上月DOU', '上上上月DOU']].mean(axis=1)
+df_all['DOU_skew']=df_all[['上月DOU', '上上月DOU', '上上上月DOU']].skew(axis=1)
+df_all['ARPU_mean']=df_all[['上月ARPU', '上上月ARPU', '上上上月ARPU']].mean(axis=1)
+df_all['ARPU_skew']=df_all[['上月ARPU', '上上月ARPU', '上上上月ARPU']].skew(axis=1)
+
+#年龄，网龄特征处理
+groupby_cols = [
+    '当前终端品牌','当前终端价格档次','家庭交往圈终端品牌偏好',
+    '用户历史终端品牌偏好','集团交往圈终端品牌偏好','新5G终端档次'
+]
+agg_cols=['年龄','网龄']
+
+for col_i in tqdm(groupby_cols):
+    for col_j in agg_cols :
+        df_all[f"{col_i}_{col_j}_agg_mean"]=df_all[col_i].map(df_all.groupby(col_i)[col_j].mean())
+        
+# 等宽分箱,特征离散化
+num_bins = 20
+cut_labels = [i for i in range(num_bins)]
+for col in tqdm(agg_cols):
+    df_all[f'{col}_bin'] = pd.cut(df_all[col],num_bins,labels=cut_labels).apply(int)
+    
+df_all['年龄_网龄_bin_mean'] = df_all['年龄_bin'].map(df_all.groupby('年龄_bin')['网龄'].mean())
+
+# 提取入模特征
+feature_cols = [i for i in df_all.columns if i not in ['用户标识','is_test','新5G终端品牌']]
+target_cols='新5G终端品牌'
+print(len(feature_cols))
+
+# 内存压缩
+df_all = reduce_mem_usage(df_all)
+df_all=df_all.replace([np.inf, -np.inf], 0)
+
+# 分离训练集，测试集
+train_df = df_all[df_all['is_test'] == 0].reset_index(drop=True)
+test_df = df_all[df_all['is_test'] == 1].reset_index(drop=True)
+del df_all
+
+# 构建 XGBoost 模型
+import xgboost as xgb
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score,classification_report
+from sklearn.preprocessing import StandardScaler
+
+
+def xgb_model(train_x, train_y, test_x,seed=888):
+    folds = 5
+    kf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed)
+    oof = np.zeros([train_x.shape[0], 11])
+    test_predict = np.zeros([test_x.shape[0], 11])
+    feat_imp_df = pd.DataFrame()
+    feat_imp_df['feature'] = train_x.columns
+    feat_imp_df['imp'] = 0
+    acc_scores = []
+    train_x = train_x.values
+    train_y = train_y.values
+    
+    #5折交叉验证
+    for i, (train_index, valid_index) in enumerate(kf.split(train_x, train_y)):
+        print("|-----------------------------------------|")
+        print("|  XGB  Fold  {}  Training Start           |".format(str(i + 1)))
+        print("|-----------------------------------------|")
+        
+        trn_x, trn_y, val_x, val_y = train_x[train_index], train_y[train_index], train_x[valid_index], \
+                                     train_y[valid_index] 
+        #定义模型参数
+        xgb_params = {
+            'booster': 'gbtree',
+            'objective': 'multi:softprob',
+            'n_estimators':200,
+            'num_class': 11,
+            'max_depth': 8,
+            'lambda': 10,
+            'subsample': 0.7,
+            'colsample_bytree': 0.8,
+            'colsample_bylevel': 0.7,
+            'eta': 0.1,
+            'tree_method': 'hist',
+            'seed': seed,
+            'nthread': 16
+        }
+        
+        # 训练 XGBoost 模型
+        xgb_model = xgb.XGBClassifier(**xgb_params)
+        xgb_model.fit(trn_x,trn_y,eval_set=[(trn_x, trn_y),(val_x,val_y)],early_stopping_rounds=20,eval_metric='mlogloss',verbose=20)  
+        val_pred  = xgb_model.predict_proba(val_x)
+        test_pred = xgb_model.predict_proba(test_x.values)
+        # 输出模型重要性
+        feat_imp_df['imp'] += xgb_model.feature_importances_ / folds
+        feat_imp_df = feat_imp_df.sort_values(by='imp', ascending=False).reset_index(drop=True)
+        feat_imp_df['rank'] = range(feat_imp_df.shape[0])
+        
+        oof[valid_index] = val_pred
+        test_predict += test_pred / kf.n_splits
+        
+        acc_score = accuracy_score(val_y, np.argmax(val_pred, axis=1))
+        acc_scores.append(acc_score)
+        print('AVG_acc :',sum(acc_scores)/len(acc_scores))
+        
+    return oof, test_predict,feat_imp_df
+
+# 训练 XGBoost模型
+xgb_oof, xgb_test, xgb_imp_df = xgb_model(train_df[feature_cols], train_df['新5G终端品牌'], test_df[feature_cols])
+xgb_pre_train = np.argmax(xgb_oof, axis=1)
+xgb_pre_test = np.argmax(xgb_test, axis=1)
+
+#保存结果
+submission = pd.read_csv('../output/testa/testb/submit_B.csv')
+submission['新5G终端品牌'] = pd.DataFrame(xgb_pre_test)[0].map({v: k for k, v in label_dict.items()})
+submission.to_csv('../output/sub.csv', index = False)
