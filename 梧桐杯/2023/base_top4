@@ -241,3 +241,4 @@ xgb_pre_test = np.argmax(xgb_test, axis=1)
 submission = pd.read_csv('../output/testa/testb/submit_B.csv')
 submission['新5G终端品牌'] = pd.DataFrame(xgb_pre_test)[0].map({v: k for k, v in label_dict.items()})
 submission.to_csv('../output/sub.csv', index = False)
+
